@@ -1,0 +1,1000 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, scrolledtext
+from PIL import Image, ImageTk
+import requests
+import re
+import time
+import random
+import threading
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import jieba
+from wordcloud import WordCloud
+import mysql.connector
+from mysql.connector import Error
+import os
+import io
+import json
+import sys
+import matplotlib as mpl
+
+# 设置Matplotlib使用中文字体
+if sys.platform.startswith('win'):
+    plt.rcParams['font.sans-serif'] = ['SimHei']  # Windows系统使用黑体
+    plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+# 设置词云使用中文字体
+if sys.platform.startswith('win'):
+    WORDCLOUD_FONT = 'simhei.ttf'
+
+
+class SkinAnalyzerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("王者荣耀皮肤分析系统 v3.0 (MySQL版)")
+        self.root.geometry("1200x800")
+        self.root.configure(bg="black")  # 主窗口背景改为黑色
+
+        # 数据库配置
+        self.db_config = {
+            'host': 'localhost',
+            'user': 'root',
+            'password': '123456',
+            'database': 'wzry_skins'
+        }
+
+        # 先创建样式和控件
+        self.create_styles()
+        self.create_widgets()  # 先创建界面控件，包括日志控件
+
+        # 然后创建数据库连接
+        self.create_connection()
+
+        # 加载初始数据
+        self.load_hero_data()
+
+    def create_connection(self):
+        """创建MySQL数据库连接"""
+        try:
+            self.conn = mysql.connector.connect(**self.db_config)
+            self.cursor = self.conn.cursor()
+            self.init_database()
+            self.log_message("成功连接到MySQL数据库")
+        except Error as e:
+            # 修复：确保日志控件已创建
+            self.log_message(f"数据库连接错误: {str(e)}")
+            messagebox.showerror("数据库错误", f"无法连接到MySQL数据库:\n{str(e)}")
+
+    def init_database(self):
+        """初始化MySQL数据库"""
+        try:
+            # 创建英雄表
+            self.cursor.execute("""CREATE TABLE IF NOT EXISTS heroes (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                hero_id INT NOT NULL,
+                                name VARCHAR(255) NOT NULL,
+                                title VARCHAR(255),
+                                position VARCHAR(255),
+                                skin_count INT DEFAULT 0,
+                                popularity INT DEFAULT 0,
+                                UNIQUE (hero_id)
+                            )""")
+
+            # 创建皮肤表
+            self.cursor.execute("""CREATE TABLE IF NOT EXISTS skins (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                hero_id INT NOT NULL,
+                                skin_id VARCHAR(255) NOT NULL,
+                                name VARCHAR(255) NOT NULL,
+                                image_url TEXT,
+                                UNIQUE (skin_id)
+                            )""")
+
+            # 创建统计表
+            self.cursor.execute("""CREATE TABLE IF NOT EXISTS statistics (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                date DATE NOT NULL,
+                                total_heroes INT DEFAULT 0,
+                                total_skins INT DEFAULT 0,
+                                top_hero VARCHAR(255))
+                            """)
+
+            self.conn.commit()
+        except Error as e:
+            self.log_message(f"数据库初始化失败: {str(e)}")
+
+    def create_styles(self):
+        """创建界面样式 - 黑色主题"""
+        style = ttk.Style()
+
+        # 配置黑色主题样式
+        style.theme_use('default')
+
+        # 标题样式 - 黑色背景白色字体
+        style.configure("Title.TLabel",
+                        background="black",
+                        foreground="white",
+                        font=("Microsoft YaHei", 24, "bold"))
+
+        # 按钮样式 - 深灰色背景白色字体
+        style.configure("TButton",
+                        background="#333333",
+                        foreground="white",
+                        font=("Microsoft YaHei", 10),
+                        padding=5,
+                        borderwidth=1,
+                        relief="raised")
+        style.map("TButton",
+                  background=[('active', '#444444'), ('pressed', '#222222')],
+                  foreground=[('active', 'white'), ('pressed', 'white')])
+
+        # 框架样式 - 黑色背景
+        style.configure("TFrame", background="black")
+        style.configure("Group.TFrame",
+                        background="#111111",  # 深黑色背景
+                        borderwidth=2,
+                        relief="groove")
+
+        # 标签页样式 - 黑色背景白色字体
+        style.configure("TNotebook", background="black")
+        style.configure("TNotebook.Tab",
+                        background="#222222",  # 深灰色背景
+                        foreground="white",
+                        padding=[10, 5],
+                        font=("Microsoft YaHei", 10))
+        style.map("TNotebook.Tab",
+                  background=[('selected', '#333333')],
+                  foreground=[('selected', 'white')])
+
+        # 进度条样式
+        style.configure("TProgressbar",
+                        background="#6c5ce7",
+                        troughcolor="#222222")  # 修改为深灰色背景
+
+        # 树状视图样式 - 深黑色背景白色字体
+        style.configure("Treeview",
+                        background="#111111",
+                        foreground="white",
+                        fieldbackground="#111111",
+                        font=("Microsoft YaHei", 10))
+        style.configure("Treeview.Heading",
+                        background="#333333",
+                        foreground="white",
+                        font=("Microsoft YaHei", 10, "bold"))
+        style.map("Treeview",
+                  background=[('selected', '#444444')],
+                  foreground=[('selected', 'white')])
+
+        # 文本框样式 - 深黑色背景白色字体
+        style.configure("TText",
+                        background="#111111",
+                        foreground="white",
+                        font=("Microsoft YaHei", 10))
+
+    def create_widgets(self):
+        """创建界面控件"""
+        # 标题
+        title_label = ttk.Label(
+            self.root,
+            text="王者荣耀皮肤分析系统 (MySQL版)",
+            style="Title.TLabel"
+        )
+        title_label.pack(pady=15)
+
+        # 创建标签页
+        self.notebook = ttk.Notebook(self.root, style="TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 添加标签页
+        self.create_data_tab()
+        self.create_analyze_tab()
+        self.create_visual_tab()
+
+        # 状态栏
+        self.status_var = tk.StringVar()
+        self.status_var.set("就绪")
+        status_bar = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            background="black",  # 黑色背景
+            foreground="white",  # 白色字体
+            anchor=tk.W,
+            padding=(10, 5)
+        )
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def create_data_tab(self):
+        """创建数据管理标签页"""
+        data_tab = ttk.Frame(self.notebook, style="TFrame")
+        self.notebook.add(data_tab, text="数据管理")
+
+        # 控制面板
+        control_frame = ttk.Frame(data_tab, style="Group.TFrame")
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        self.crawl_btn = ttk.Button(
+            control_frame,
+            text="开始爬取数据",
+            command=self.start_crawling,
+            style="TButton"
+        )
+        self.crawl_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.download_btn = ttk.Button(
+            control_frame,
+            text="下载皮肤图片",
+            command=self.start_downloading,
+            style="TButton"
+        )
+        self.download_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.export_btn = ttk.Button(
+            control_frame,
+            text="导出Excel",
+            command=self.export_to_excel,
+            style="TButton"
+        )
+        self.export_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.refresh_btn = ttk.Button(
+            control_frame,
+            text="刷新数据",
+            command=self.load_hero_data,
+            style="TButton"
+        )
+        self.refresh_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.clear_btn = ttk.Button(
+            control_frame,
+            text="清空数据库",
+            command=self.clear_database,
+            style="TButton"
+        )
+        self.clear_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # 进度条
+        self.progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(
+            data_tab,
+            variable=self.progress_var,
+            length=1180,
+            style="TProgressbar"
+        )
+        progress_bar.pack(padx=10, pady=5)
+
+        # 日志区域
+        log_frame = ttk.LabelFrame(data_tab, text="操作日志", style="Group.TFrame")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            bg="#111111",  # 深黑色背景
+            fg="white",  # 白色字体
+            insertbackground="white",  # 光标白色
+            font=("Microsoft YaHei", 10)
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.log_text.config(state=tk.DISABLED)
+
+        # 数据表格
+        table_frame = ttk.LabelFrame(data_tab, text="英雄数据", style="Group.TFrame")
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        columns = ("id", "name", "title", "position", "skin_count", "popularity")
+        self.hero_table = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="Treeview"
+        )
+
+        # 设置列标题
+        self.hero_table.heading("id", text="ID")
+        self.hero_table.heading("name", text="英雄名称")
+        self.hero_table.heading("title", text="称号")
+        self.hero_table.heading("position", text="位置")
+        self.hero_table.heading("skin_count", text="皮肤数量")
+        self.hero_table.heading("popularity", text="人气值")
+
+        # 设置列宽
+        self.hero_table.column("id", width=50, anchor=tk.CENTER)
+        self.hero_table.column("name", width=150, anchor=tk.CENTER)
+        self.hero_table.column("title", width=150, anchor=tk.CENTER)
+        self.hero_table.column("position", width=100, anchor=tk.CENTER)
+        self.hero_table.column("skin_count", width=80, anchor=tk.CENTER)
+        self.hero_table.column("popularity", width=100, anchor=tk.CENTER)
+
+        # 添加滚动条
+        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.hero_table.yview)
+        self.hero_table.configure(yscrollcommand=scrollbar.set)
+
+        # 布局
+        self.hero_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def create_analyze_tab(self):
+        """创建数据分析标签页"""
+        analyze_tab = ttk.Frame(self.notebook, style="TFrame")
+        self.notebook.add(analyze_tab, text="数据分析")
+
+        # 控制面板
+        control_frame = ttk.Frame(analyze_tab, style="Group.TFrame")
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        self.analyze_btn = ttk.Button(
+            control_frame,
+            text="开始分析",
+            command=self.analyze_data,
+            style="TButton"
+        )
+        self.analyze_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.wordcloud_btn = ttk.Button(
+            control_frame,
+            text="生成词云",
+            command=self.generate_wordcloud,
+            style="TButton"
+        )
+        self.wordcloud_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # 图表区域
+        chart_frame = ttk.Frame(analyze_tab, style="Group.TFrame")
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 左侧柱状图
+        left_frame = ttk.Frame(chart_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        fig1 = plt.Figure(figsize=(6, 4), dpi=100, facecolor='#111111')  # 深黑色背景
+        self.ax1 = fig1.add_subplot(111)
+        self.ax1.set_title('英雄皮肤数量TOP10', color='white', fontsize=12)
+        self.ax1.set_xlabel('英雄', color='white')
+        self.ax1.set_ylabel('皮肤数量', color='white')
+        self.ax1.tick_params(axis='x', colors='white')
+        self.ax1.tick_params(axis='y', colors='white')
+        self.ax1.set_facecolor('#111111')  # 深黑色背景
+
+        self.canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
+        self.canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # 右侧饼图 (展示英雄职业占比)
+        right_frame = ttk.Frame(chart_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        fig2 = plt.Figure(figsize=(6, 4), dpi=100, facecolor='#111111')  # 深黑色背景
+        self.ax2 = fig2.add_subplot(111)
+        self.ax2.set_title('英雄职业分布', color='white', fontsize=12)  # 修改标题
+        self.ax2.tick_params(axis='x', colors='white')
+        self.ax2.tick_params(axis='y', colors='white')
+
+        self.canvas2 = FigureCanvasTkAgg(fig2, master=right_frame)
+        self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def create_visual_tab(self):
+        """创建皮肤展示标签页"""
+        visual_tab = ttk.Frame(self.notebook, style="TFrame")
+        self.notebook.add(visual_tab, text="皮肤展示")
+
+        # 英雄选择
+        hero_frame = ttk.LabelFrame(visual_tab, text="选择英雄", style="Group.TFrame")
+        hero_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(hero_frame, text="选择英雄:", background="#111111", foreground="white").pack(side=tk.LEFT, padx=5)
+
+        self.hero_var = tk.StringVar()
+        self.hero_combobox = ttk.Combobox(
+            hero_frame,
+            textvariable=self.hero_var,
+            state="readonly",
+            width=20,
+            style="TCombobox"
+        )
+        self.hero_combobox.pack(side=tk.LEFT, padx=5, pady=5)
+        self.hero_combobox.bind("<<ComboboxSelected>>", self.load_hero_skins)
+
+        # 皮肤展示区
+        display_frame = ttk.Frame(visual_tab, style="Group.TFrame")
+        display_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 左侧皮肤图片
+        left_frame = ttk.Frame(display_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.skin_image_label = ttk.Label(
+            left_frame,
+            background="#111111",  # 深黑色背景
+            anchor=tk.CENTER
+        )
+        self.skin_image_label.pack(fill=tk.BOTH, expand=True)
+
+        # 右侧皮肤信息
+        info_frame = ttk.Frame(left_frame)
+        info_frame.pack(fill=tk.X, pady=10)
+
+        self.skin_name_var = tk.StringVar(value="皮肤名称: -")
+        ttk.Label(
+            info_frame,
+            textvariable=self.skin_name_var,
+            background="#111111",  # 深黑色背景
+            foreground="white",  # 白色字体
+            font=("Microsoft YaHei", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # 皮肤列表
+        table_frame = ttk.Frame(display_frame)
+        table_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        columns = ("id", "name")
+        self.skins_table = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="Treeview"
+        )
+
+        # 设置列标题
+        self.skins_table.heading("id", text="ID")
+        self.skins_table.heading("name", text="皮肤名称")
+
+        # 设置列宽
+        self.skins_table.column("id", width=50, anchor=tk.CENTER)
+        self.skins_table.column("name", width=150, anchor=tk.CENTER)
+
+        # 绑定选择事件
+        self.skins_table.bind("<<TreeviewSelect>>", self.display_skin_image)
+
+        # 添加滚动条
+        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.skins_table.yview)
+        self.skins_table.configure(yscrollcommand=scrollbar.set)
+
+        # 布局
+        self.skins_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def log_message(self, message):
+        """记录日志信息"""
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
+        self.log_text.config(state=tk.DISABLED)
+        self.log_text.see(tk.END)
+        self.status_var.set(message)
+
+    def start_crawling(self):
+        """开始爬取数据"""
+        self.crawl_btn.config(state=tk.DISABLED)
+        self.log_message("开始爬取王者荣耀皮肤数据...")
+
+        # 启动爬虫线程
+        threading.Thread(target=self.crawl_data, daemon=True).start()
+
+    def start_downloading(self):
+        """开始下载皮肤图片"""
+        self.download_btn.config(state=tk.DISABLED)
+        self.log_message("开始下载皮肤图片...")
+
+        # 创建图片存储目录
+        if not os.path.exists('img_skin'):
+            os.makedirs('img_skin')
+            self.log_message("创建图片存储目录: img_skin")
+
+        # 启动下载线程
+        threading.Thread(target=self.download_skin_images, daemon=True).start()
+
+    def download_skin_images(self):
+        """下载皮肤图片"""
+        try:
+            # 获取英雄列表
+            self.cursor.execute("SELECT hero_id, name FROM heroes")
+            heroes = self.cursor.fetchall()
+
+            total_heroes = len(heroes)
+            downloaded_count = 0
+
+            for idx, hero in enumerate(heroes):
+                hero_id = hero[0]
+                hero_name = hero[1]
+
+                # 获取该英雄的皮肤数量
+                self.cursor.execute("SELECT COUNT(*) FROM skins WHERE hero_id = %s", (hero_id,))
+                skin_count = self.cursor.fetchone()[0]
+
+                self.progress_var.set((idx + 1) / total_heroes * 100)
+                self.log_message(f"正在下载 {hero_name} 的皮肤图片...")
+
+                # 下载每个皮肤图片
+                for skin_num in range(1, skin_count + 1):
+                    try:
+                        # 构造图片URL
+                        skin_url = f'https://game.gtimg.cn/images/yxzj/img201606/skin/hero-info/{hero_id}/{hero_id}-bigskin-{skin_num}.jpg'
+
+                        # 下载图片
+                        response = requests.get(skin_url, timeout=10)
+                        if response.status_code == 200:
+                            # 保存图片
+                            filename = f'img_skin/{hero_id}_{hero_name}_{skin_num}.jpg'
+                            with open(filename, 'wb') as f:
+                                f.write(response.content)
+                            downloaded_count += 1
+                            self.log_message(f"√ 已保存: {filename}")
+                        else:
+                            self.log_message(f"× 下载失败: {skin_url} (状态码: {response.status_code})")
+
+                        # 延迟防止请求过快
+                        time.sleep(0.5)
+
+                    except Exception as e:
+                        self.log_message(f"下载皮肤时出错: {skin_url} - {str(e)}")
+                        time.sleep(2)  # 出错后增加延迟
+
+            self.log_message(f"成功下载 {downloaded_count} 张皮肤图片")
+            self.progress_var.set(0)
+            messagebox.showinfo("完成", "皮肤图片下载完成！")
+
+        except Error as e:
+            self.log_message(f"数据库错误: {str(e)}")
+            messagebox.showerror("数据库错误", f"数据库操作失败:\n{str(e)}")
+        except Exception as e:
+            self.log_message(f"下载皮肤图片失败: {str(e)}")
+            messagebox.showerror("错误", f"下载过程中发生错误:\n{str(e)}")
+        finally:
+            self.download_btn.config(state=tk.NORMAL)
+
+    def crawl_data(self):
+        """爬取皮肤数据 - MySQL版本"""
+        try:
+            # 获取英雄列表
+            base_url = "https://pvp.qq.com/web201605/js/herolist.json"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': 'https://pvp.qq.com/web201605/herolist.shtml'
+            }
+
+            response = requests.get(base_url, headers=headers)
+            if response.status_code != 200:
+                self.log_message(f"获取英雄列表失败，状态码: {response.status_code}")
+                return
+
+            hero_list = response.json()
+            total_heroes = len(hero_list)
+            all_skins = []
+
+            # 位置映射字典
+            position_map = {
+                1: "战士",
+                2: "法师",
+                3: "坦克",
+                4: "刺客",
+                5: "射手",
+                6: "辅助"
+            }
+
+            for idx, hero in enumerate(hero_list):
+                hero_id = hero['ename']
+                hero_name = hero['cname']
+                hero_title = hero['title']
+
+                # 处理位置信息
+                position_types = []
+                if 'hero_type' in hero:
+                    if isinstance(hero['hero_type'], list):
+                        position_types.extend(hero['hero_type'])
+                    else:
+                        position_types.append(hero['hero_type'])
+                if 'hero_type2' in hero:
+                    if isinstance(hero['hero_type2'], list):
+                        position_types.extend(hero['hero_type2'])
+                    else:
+                        position_types.append(hero['hero_type2'])
+
+                # 转换为位置名称
+                position_names = [position_map.get(t, str(t)) for t in position_types]
+                hero_position = "/".join(position_names) if position_names else "未知"
+
+                self.progress_var.set((idx + 1) / total_heroes * 100)
+                self.log_message(f"正在爬取 {hero_name} 的皮肤数据...")
+
+                # 获取皮肤名称列表
+                skin_names = hero.get('skin_name', '')
+                if skin_names:
+                    skin_names = skin_names.split('|')
+                else:
+                    skin_names = [hero_title]  # 如果没有皮肤名称，使用英雄称号
+
+                # 特殊处理马超
+                if hero_id == 518:
+                    skin_count = 6
+                else:
+                    skin_count = len(skin_names)
+
+                skins = []
+                for skin_idx in range(skin_count):
+                    try:
+                        # 构造皮肤名称
+                        skin_name = skin_names[skin_idx] if skin_idx < len(
+                            skin_names) else f"{hero_name}皮肤{skin_idx + 1}"
+
+                        # 构造图片URL
+                        img_url = f'https://game.gtimg.cn/images/yxzj/img201606/skin/hero-info/{hero_id}/{hero_id}-bigskin-{skin_idx + 1}.jpg'
+
+                        # 添加到皮肤列表
+                        skins.append({
+                            'hero_id': hero_id,
+                            'skin_id': f"{hero_id}_{skin_idx + 1}",
+                            'name': skin_name,
+                            'image_url': img_url
+                        })
+                    except Exception as e:
+                        self.log_message(f"处理皮肤时出错: {str(e)}")
+
+                # 保存英雄数据
+                hero_data = {
+                    'hero_id': hero_id,
+                    'name': hero_name,
+                    'title': hero_title,
+                    'position': hero_position,
+                    'skin_count': len(skins)
+                }
+
+                # 保存到数据库
+                self.save_to_database(hero_data, skins)
+
+                # 收集所有皮肤数据
+                all_skins.extend(skins)
+
+                # 随机延迟，防止请求过快
+                time.sleep(random.uniform(0.3, 0.8))
+
+            self.log_message(f"成功爬取 {len(all_skins)} 个皮肤数据")
+            self.progress_var.set(0)
+            self.load_hero_data()
+            messagebox.showinfo("完成", "皮肤数据爬取完成！")
+
+        except Error as e:
+            self.log_message(f"数据库错误: {str(e)}")
+            messagebox.showerror("数据库错误", f"数据库操作失败:\n{str(e)}")
+        except Exception as e:
+            self.log_message(f"爬取失败: {str(e)}")
+            messagebox.showerror("错误", f"爬取过程中发生错误:\n{str(e)}")
+        finally:
+            self.crawl_btn.config(state=tk.NORMAL)
+
+    def save_to_database(self, hero_data, skins):
+        """保存数据到MySQL数据库"""
+        try:
+            # 插入或更新英雄数据
+            self.cursor.execute("""
+                INSERT INTO heroes (hero_id, name, title, position, skin_count)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    title = VALUES(title),
+                    position = VALUES(position),
+                    skin_count = VALUES(skin_count)
+            """, (
+                hero_data['hero_id'],
+                hero_data['name'],
+                hero_data['title'],
+                hero_data['position'],
+                hero_data['skin_count']
+            ))
+
+            # 插入或更新皮肤数据
+            for skin in skins:
+                self.cursor.execute("""
+                    INSERT INTO skins (hero_id, skin_id, name, image_url)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        name = VALUES(name),
+                        image_url = VALUES(image_url)
+                """, (
+                    skin['hero_id'],
+                    skin['skin_id'],
+                    skin['name'],
+                    skin['image_url']
+                ))
+
+            self.conn.commit()
+        except Error as e:
+            self.log_message(f"数据库保存失败: {e}")
+
+    def load_hero_data(self):
+        """从数据库加载英雄数据"""
+        try:
+            self.cursor.execute("SELECT id, hero_id, name, title, position, skin_count FROM heroes")
+            heroes = self.cursor.fetchall()
+
+            # 清空表格
+            for item in self.hero_table.get_children():
+                self.hero_table.delete(item)
+
+            # 添加数据
+            for hero in heroes:
+                self.hero_table.insert("", tk.END, values=(
+                    hero[0],
+                    hero[2],  # name
+                    hero[3],  # title
+                    hero[4],  # position
+                    hero[5],  # skin_count
+                    random.randint(10000, 100000)  # popularity
+                ))
+
+            self.log_message(f"成功加载 {len(heroes)} 位英雄数据")
+
+            # 加载英雄下拉框
+            self.load_hero_combobox()
+
+        except Error as e:
+            self.log_message(f"加载英雄数据失败: {e}")
+
+    def load_hero_combobox(self):
+        """加载英雄到下拉框"""
+        try:
+            self.cursor.execute("SELECT name FROM heroes")
+            heroes = [row[0] for row in self.cursor.fetchall()]
+
+            self.hero_combobox['values'] = heroes
+
+            if heroes:
+                self.hero_var.set(heroes[0])
+                self.load_hero_skins()
+
+        except Error as e:
+            self.log_message(f"加载英雄列表失败: {e}")
+
+    def load_hero_skins(self, event=None):
+        """加载选中英雄的皮肤"""
+        hero_name = self.hero_var.get()
+        if not hero_name:
+            return
+
+        try:
+            # 获取英雄ID
+            self.cursor.execute("SELECT hero_id FROM heroes WHERE name = %s", (hero_name,))
+            result = self.cursor.fetchone()
+            if not result:
+                return
+            hero_id = result[0]
+
+            # 获取皮肤数据
+            self.cursor.execute("""
+                SELECT skin_id, name
+                FROM skins 
+                WHERE hero_id = %s
+            """, (hero_id,))
+            skins = self.cursor.fetchall()
+
+            # 清空表格
+            for item in self.skins_table.get_children():
+                self.skins_table.delete(item)
+
+            # 添加数据
+            for skin in skins:
+                self.skins_table.insert("", tk.END, values=(
+                    skin[0],  # skin_id
+                    skin[1]  # name
+                ))
+
+            # 默认显示第一张皮肤
+            if skins:
+                self.skins_table.selection_set(self.skins_table.get_children()[0])
+                self.display_skin_image()
+
+        except Error as e:
+            self.log_message(f"加载皮肤数据失败: {e}")
+
+    def display_skin_image(self, event=None):
+        """显示选中的皮肤图片"""
+        selected = self.skins_table.selection()
+        if not selected:
+            return
+
+        item = self.skins_table.item(selected[0])
+        skin_name = item['values'][1]
+
+        self.skin_name_var.set(f"皮肤名称: {skin_name}")
+
+        try:
+            # 获取图片URL
+            self.cursor.execute("SELECT image_url FROM skins WHERE name = %s", (skin_name,))
+            result = self.cursor.fetchone()
+            if not result:
+                return
+            image_url = result[0]
+
+            # 下载图片
+            response = requests.get(image_url, timeout=10)
+            if response.status_code == 200:
+                # 使用PIL处理图片
+                image = Image.open(io.BytesIO(response.content))
+                image.thumbnail((400, 400))  # 调整大小
+
+                # 转换为Tkinter PhotoImage
+                photo = ImageTk.PhotoImage(image)
+
+                # 更新标签
+                self.skin_image_label.config(image=photo)
+                self.skin_image_label.image = photo  # 保持引用
+
+        except (Error, requests.RequestException) as e:
+            self.log_message(f"加载皮肤图片失败: {e}")
+
+    def analyze_data(self):
+        """分析数据并生成图表"""
+        self.log_message("开始分析皮肤数据...")
+
+        try:
+            # 1. 英雄皮肤数量TOP10
+            self.cursor.execute("""
+                SELECT h.name, COUNT(s.id) as skin_count 
+                FROM heroes h
+                JOIN skins s ON h.hero_id = s.hero_id
+                GROUP BY h.name
+                ORDER BY skin_count DESC
+                LIMIT 10
+            """)
+            top_heroes = self.cursor.fetchall()
+
+            heroes = [item[0] for item in top_heroes]
+            skin_counts = [item[1] for item in top_heroes]
+
+            # 绘制柱状图
+            self.ax1.clear()
+            self.ax1.bar(heroes, skin_counts, color=['#6c5ce7', '#a29bfe', '#00cec9', '#55efc4', '#74b9ff'])
+            self.ax1.set_title('英雄皮肤数量TOP10', color='white', fontsize=12)
+            self.ax1.set_xlabel('英雄', color='white')
+            self.ax1.set_ylabel('皮肤数量', color='white')
+            self.ax1.tick_params(axis='x', rotation=45, colors='white')
+            self.ax1.tick_params(axis='y', colors='white')
+            self.ax1.set_facecolor('#111111')  # 深黑色背景
+
+            # 设置字体
+            for label in (self.ax1.get_xticklabels() + self.ax1.get_yticklabels()):
+                label.set_fontname('SimHei' if sys.platform.startswith('win') else 'WenQuanYi Micro Hei')
+                label.set_fontsize(10)
+
+            self.canvas1.draw()
+
+            # 2. 英雄职业分布
+            # 获取所有英雄的职业数据
+            self.cursor.execute("SELECT position FROM heroes")
+            positions = self.cursor.fetchall()
+
+            # 统计每个职业的数量
+            position_count = {}
+            for pos in positions:
+                # 每个英雄可能有多个职业（用/分隔）
+                for p in pos[0].split('/'):
+                    p = p.strip()
+                    if p:
+                        position_count[p] = position_count.get(p, 0) + 1
+
+            # 准备饼图数据
+            labels = list(position_count.keys())
+            sizes = list(position_count.values())
+
+            # 绘制饼图
+            self.ax2.clear()
+            colors = ['#6c5ce7', '#a29bfe', '#00cec9', '#55efc4', '#74b9ff', '#ff7675', '#fdcb6e']
+            self.ax2.pie(sizes, labels=labels, autopct='%1.1f%%',
+                         colors=colors[:len(labels)], startangle=90, shadow=True,
+                         textprops={'color': 'white', 'fontsize': 10})
+            self.ax2.set_title('英雄职业分布', color='white', fontsize=12)
+            self.ax2.axis('equal')  # 保证饼图是圆形
+
+            # 设置字体
+            for text in self.ax2.texts:
+                text.set_fontname('SimHei' if sys.platform.startswith('win') else 'WenQuanYi Micro Hei')
+
+            self.canvas2.draw()
+
+            self.log_message("数据分析完成")
+
+        except Error as e:
+            self.log_message(f"数据分析失败: {e}")
+            messagebox.showerror("错误", f"数据分析失败:\n{str(e)}")
+
+    def generate_wordcloud(self):
+        """生成皮肤名称词云"""
+        try:
+            self.cursor.execute("SELECT name FROM skins")
+            skins = self.cursor.fetchall()
+
+            text = " ".join([skin[0] for skin in skins])
+
+            # 使用jieba分词
+            words = jieba.cut(text)
+            word_text = " ".join(words)
+
+            # 生成词云
+            wc = WordCloud(
+                font_path=WORDCLOUD_FONT,  # 使用配置的字体
+                background_color='#111111',  # 深黑色背景
+                width=800,
+                height=600,
+                max_words=100,
+                colormap='viridis'
+            ).generate(word_text)
+
+            # 显示词云
+            plt.figure(figsize=(10, 8), facecolor='#111111')
+            plt.imshow(wc, interpolation='bilinear')
+            plt.axis("off")
+            plt.title("王者荣耀皮肤名称词云", fontsize=16, color='white')
+            plt.tight_layout()
+            plt.show()
+
+            self.log_message("词云生成成功")
+
+        except Exception as e:
+            self.log_message(f"生成词云失败: {e}")
+            messagebox.showerror("错误", f"生成词云失败:\n{str(e)}")
+
+    def export_to_excel(self):
+        """导出数据到Excel"""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx"), ("所有文件", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            # 创建Excel工作簿
+            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                # 英雄数据
+                heroes_df = pd.read_sql("SELECT * FROM heroes", self.conn)
+                heroes_df.to_excel(writer, sheet_name='英雄数据', index=False)
+
+                # 皮肤数据
+                skins_df = pd.read_sql("SELECT id, hero_id, skin_id, name, image_url FROM skins", self.conn)
+                skins_df.to_excel(writer, sheet_name='皮肤数据', index=False)
+
+            self.log_message(f"数据已导出到: {file_path}")
+            messagebox.showinfo("导出成功", f"数据已成功导出到:\n{file_path}")
+
+        except Error as e:
+            self.log_message(f"数据库错误: {str(e)}")
+            messagebox.showerror("数据库错误", f"数据库操作失败:\n{str(e)}")
+        except Exception as e:
+            self.log_message(f"导出失败: {str(e)}")
+            messagebox.showerror("导出失败", f"导出过程中发生错误:\n{str(e)}")
+
+    def clear_database(self):
+        """清空数据库"""
+        if not messagebox.askyesno("确认清空", "确定要清空数据库中的所有数据吗？此操作不可恢复！"):
+            return
+
+        try:
+            self.cursor.execute("DELETE FROM heroes")
+            self.cursor.execute("DELETE FROM skins")
+            self.cursor.execute("DELETE FROM statistics")
+            self.conn.commit()
+
+            self.log_message("数据库已清空")
+
+            # 刷新表格
+            for item in self.hero_table.get_children():
+                self.hero_table.delete(item)
+
+            for item in self.skins_table.get_children():
+                self.skins_table.delete(item)
+
+            self.hero_combobox['values'] = []
+            self.hero_var.set('')
+
+            self.skin_image_label.config(image=None)
+            self.skin_name_var.set("皮肤名称: -")
+
+            messagebox.showinfo("完成", "数据库已成功清空")
+
+        except Error as e:
+            self.log_message(f"清空数据库失败: {e}")
+            messagebox.showerror("错误", f"清空数据库失败:\n{str(e)}")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SkinAnalyzerApp(root)
+    root.mainloop()
